@@ -1,6 +1,6 @@
 /*
 * Programming Assignment 02: ls
-* Version 1.4.0 - entries are sorted alphabetically
+* Version 1.5.0 - colorized output based on file type
 * Usage:
 *       $ ls
 *       $ ls -l
@@ -23,6 +23,14 @@
 
 extern int errno;
 
+/* ANSI escape codes for colors (\033 is the ESC character) */
+#define COLOR_RESET    "\033[0m"
+#define COLOR_BLUE     "\033[0;34m"    /* directories */
+#define COLOR_GREEN    "\033[0;32m"    /* executables */
+#define COLOR_RED      "\033[0;31m"    /* archives: .tar .gz .zip */
+#define COLOR_PINK     "\033[1;35m"    /* symbolic links */
+#define COLOR_REVERSE  "\033[7m"       /* special files: reverse video */
+
 /* The three ways the program can display files */
 typedef enum
 {
@@ -36,8 +44,11 @@ int read_names(const char *dir, char ***names_out, int *count_out, int *maxlen_o
 int compare_names(const void *a, const void *b);
 void free_names(char **names, int count);
 void display_long(const char *dir, char **names, int count);
-void display_columns(char **names, int count, int maxlen);
-void display_horizontal(char **names, int count, int maxlen);
+void display_columns(const char *dir, char **names, int count, int maxlen);
+void display_horizontal(const char *dir, char **names, int count, int maxlen);
+const char *get_color(const char *name, mode_t mode);
+void print_colored(const char *name, mode_t mode);
+void print_name_at(const char *dir, const char *name);
 int get_terminal_width(void);
 void mode_to_string(mode_t mode, char *str);
 const char *user_name(uid_t uid, char *buf, size_t n);
@@ -103,9 +114,9 @@ void do_ls(const char *dir, display_mode_t mode)
     else if (count > 0)
     {
         if (mode == MODE_HORIZONTAL)
-            display_horizontal(names, count, maxlen);
+            display_horizontal(dir, names, count, maxlen);
         else
-            display_columns(names, count, maxlen);
+            display_columns(dir, names, count, maxlen);
     }
 
     free_names(names, count);
@@ -188,6 +199,55 @@ void free_names(char **names, int count)
     free(names);
 }
 
+/* Decide which color a file gets, based on its st_mode and its name.
+   Returns NULL when the file should keep the default color. */
+const char *get_color(const char *name, mode_t mode)
+{
+    if (S_ISLNK(mode))
+        return COLOR_PINK;
+    if (S_ISDIR(mode))
+        return COLOR_BLUE;
+    if (S_ISCHR(mode) || S_ISBLK(mode) || S_ISSOCK(mode) || S_ISFIFO(mode))
+        return COLOR_REVERSE;
+    if (mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+        return COLOR_GREEN;
+
+    /* Archives: check the filename extension */
+    const char *dot = strrchr(name, '.');
+    if (dot != NULL &&
+        (strcmp(dot, ".tar") == 0 || strcmp(dot, ".gz") == 0 ||
+         strcmp(dot, ".tgz") == 0 || strcmp(dot, ".zip") == 0))
+        return COLOR_RED;
+
+    return NULL;
+}
+
+/* Print a filename in its color (only when output goes to a terminal) */
+void print_colored(const char *name, mode_t mode)
+{
+    const char *color = NULL;
+    if (isatty(STDOUT_FILENO))
+        color = get_color(name, mode);
+
+    if (color != NULL)
+        printf("%s%s%s", color, name, COLOR_RESET);
+    else
+        printf("%s", name);
+}
+
+/* lstat() a file inside dir, then print its name in the right color */
+void print_name_at(const char *dir, const char *name)
+{
+    char path[PATH_MAX];
+    struct stat st;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (lstat(path, &st) == -1)
+        printf("%s", name);              /* cannot stat: plain name */
+    else
+        print_colored(name, st.st_mode);
+}
+
 /* Get the terminal width using ioctl; fall back to 80 columns */
 int get_terminal_width(void)
 {
@@ -198,7 +258,7 @@ int get_terminal_width(void)
 }
 
 /* Print names in columns, "down then across" */
-void display_columns(char **names, int count, int maxlen)
+void display_columns(const char *dir, char **names, int count, int maxlen)
 {
     int term_width = get_terminal_width();
     int col_width = maxlen + 2;          /* longest name + 2 spaces */
@@ -217,17 +277,17 @@ void display_columns(char **names, int count, int maxlen)
             if (idx >= count)
                 break;
             int next = idx + rows;       /* next item on this row */
+            print_name_at(dir, names[idx]);
+            /* Pad with spaces by hand: color codes would break %-*s */
             if (c + 1 < cols && next < count)
-                printf("%-*s", col_width, names[idx]);
-            else
-                printf("%s", names[idx]);
+                printf("%*s", col_width - (int)strlen(names[idx]), "");
         }
         printf("\n");
     }
 }
 
 /* Print names left to right, wrapping when the line is full (-x) */
-void display_horizontal(char **names, int count, int maxlen)
+void display_horizontal(const char *dir, char **names, int count, int maxlen)
 {
     int term_width = get_terminal_width();
     int col_width = maxlen + 2;   /* longest name + 2 spaces */
@@ -241,7 +301,9 @@ void display_horizontal(char **names, int count, int maxlen)
             printf("\n");
             pos = 0;
         }
-        printf("%-*s", col_width, names[i]);
+        print_name_at(dir, names[i]);
+        /* Pad with spaces by hand: color codes would break %-*s */
+        printf("%*s", col_width - (int)strlen(names[i]), "");
         pos += col_width;
     }
     printf("\n");
@@ -300,14 +362,14 @@ void display_long(const char *dir, char **names, int count)
         char *t = ctime(&st.st_mtime);
         snprintf(timestr, sizeof(timestr), "%.12s", t + 4);
 
-        printf("%s %*lu %-*s %-*s %*lld %s %s",
+        printf("%s %*lu %-*s %-*s %*lld %s ",
                perms,
                w_link, (unsigned long)st.st_nlink,
                w_user, user_name(st.st_uid, ubuf, sizeof(ubuf)),
                w_group, group_name(st.st_gid, gbuf, sizeof(gbuf)),
                w_size, (long long)st.st_size,
-               timestr,
-               names[i]);
+               timestr);
+        print_colored(names[i], st.st_mode);
 
         /* For symbolic links, show where they point */
         if (S_ISLNK(st.st_mode))
