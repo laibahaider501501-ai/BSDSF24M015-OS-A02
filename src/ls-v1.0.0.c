@@ -1,6 +1,6 @@
 /*
 * Programming Assignment 02: ls
-* Version 1.3.0 - adds -x (horizontal, left to right) display
+* Version 1.4.0 - entries are sorted alphabetically
 * Usage:
 *       $ ls
 *       $ ls -l
@@ -32,7 +32,10 @@ typedef enum
 } display_mode_t;
 
 void do_ls(const char *dir, display_mode_t mode);
-void do_ls_long(const char *dir);
+int read_names(const char *dir, char ***names_out, int *count_out, int *maxlen_out);
+int compare_names(const void *a, const void *b);
+void free_names(char **names, int count);
+void display_long(const char *dir, char **names, int count);
 void display_columns(char **names, int count, int maxlen);
 void display_horizontal(char **names, int count, int maxlen);
 int get_terminal_width(void);
@@ -79,21 +82,45 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+/* Read all names, sort them, then hand them to the right display function */
 void do_ls(const char *dir, display_mode_t mode)
 {
-    /* Long listing has its own function; the other modes share the code below */
+    char **names = NULL;
+    int count = 0;
+    int maxlen = 0;
+
+    if (read_names(dir, &names, &count, &maxlen) == -1)
+        return;
+
+    /* Sort alphabetically BEFORE any display function is called */
+    qsort(names, count, sizeof(char *), compare_names);
+
+    /* Choose the display function based on the mode flag */
     if (mode == MODE_LONG)
     {
-        do_ls_long(dir);
-        return;
+        display_long(dir, names, count);
+    }
+    else if (count > 0)
+    {
+        if (mode == MODE_HORIZONTAL)
+            display_horizontal(names, count, maxlen);
+        else
+            display_columns(names, count, maxlen);
     }
 
+    free_names(names, count);
+}
+
+/* Read every (non-hidden) entry of a directory into a dynamic array.
+   Returns 0 on success, -1 if the directory cannot be opened. */
+int read_names(const char *dir, char ***names_out, int *count_out, int *maxlen_out)
+{
     struct dirent *entry;
     DIR *dp = opendir(dir);
     if (dp == NULL)
     {
         fprintf(stderr, "Cannot open directory : %s\n", dir);
-        return;
+        return -1;
     }
 
     char **names = NULL;   /* dynamic array of filenames */
@@ -138,16 +165,24 @@ void do_ls(const char *dir, display_mode_t mode)
     }
     closedir(dp);
 
-    /* Choose the display function based on the mode flag */
-    if (count > 0)
-    {
-        if (mode == MODE_HORIZONTAL)
-            display_horizontal(names, count, maxlen);
-        else
-            display_columns(names, count, maxlen);
-    }
+    *names_out = names;
+    *count_out = count;
+    *maxlen_out = maxlen;
+    return 0;
+}
 
-    /* Free every string, then the array itself */
+/* Comparison function for qsort: qsort passes pointers to the array
+   elements, and each element is a char *, so each argument is a char ** */
+int compare_names(const void *a, const void *b)
+{
+    const char *s1 = *(const char **)a;
+    const char *s2 = *(const char **)b;
+    return strcmp(s1, s2);
+}
+
+/* Free every string, then the array itself */
+void free_names(char **names, int count)
+{
     for (int i = 0; i < count; i++)
         free(names[i]);
     free(names);
@@ -213,16 +248,8 @@ void display_horizontal(char **names, int count, int maxlen)
 }
 
 /* Long listing: like "ls -l". Two passes so the columns line up. */
-void do_ls_long(const char *dir)
+void display_long(const char *dir, char **names, int count)
 {
-    DIR *dp = opendir(dir);
-    if (dp == NULL)
-    {
-        fprintf(stderr, "Cannot open directory : %s\n", dir);
-        return;
-    }
-
-    struct dirent *entry;
     struct stat st;
     char path[PATH_MAX];
     char buf[64];
@@ -231,12 +258,9 @@ void do_ls_long(const char *dir)
     long long total_blocks = 0;
 
     /* Pass 1: find the widest value in each column and the block total */
-    errno = 0;
-    while ((entry = readdir(dp)) != NULL)
+    for (int i = 0; i < count; i++)
     {
-        if (entry->d_name[0] == '.')
-            continue;
-        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         if (lstat(path, &st) == -1)
         {
             perror(path);
@@ -261,13 +285,10 @@ void do_ls_long(const char *dir)
     /* st_blocks counts 512-byte blocks, ls prints 1K blocks */
     printf("total %lld\n", total_blocks / 2);
 
-    /* Pass 2: print every entry */
-    rewinddir(dp);
-    while ((entry = readdir(dp)) != NULL)
+    /* Pass 2: print every entry (already sorted) */
+    for (int i = 0; i < count; i++)
     {
-        if (entry->d_name[0] == '.')
-            continue;
-        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         if (lstat(path, &st) == -1)
             continue;
 
@@ -286,7 +307,7 @@ void do_ls_long(const char *dir)
                w_group, group_name(st.st_gid, gbuf, sizeof(gbuf)),
                w_size, (long long)st.st_size,
                timestr,
-               entry->d_name);
+               names[i]);
 
         /* For symbolic links, show where they point */
         if (S_ISLNK(st.st_mode))
@@ -301,8 +322,6 @@ void do_ls_long(const char *dir)
         }
         printf("\n");
     }
-
-    closedir(dp);
 }
 
 /* Convert st_mode into a string like "drwxr-xr-x" */
